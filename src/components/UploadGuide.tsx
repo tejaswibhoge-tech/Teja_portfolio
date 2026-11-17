@@ -74,15 +74,24 @@ git push origin main`;
           </div>
           <ol className="text-sm text-slate-600 space-y-2.5 list-decimal list-inside leading-relaxed">
             <li>
-              Click <strong>Download .zip Bundle</strong> in the top bar and
-              extract the folder on your computer.
+              Click <strong>Download .zip Bundle</strong> in the top bar and{' '}
+              <strong>extract (unzip)</strong> the folder on your computer first.{' '}
+              <span className="text-amber-800 font-medium">
+                Do not upload the <code>.zip</code> file itself — GitHub ignores zip
+                archives in the language bar.
+              </span>
             </li>
             <li>
-              Open your repository on GitHub and choose{' '}
-              <strong>Add file → Upload files</strong>.
+              Open your target repository on GitHub (for your live portfolio, use{' '}
+              <code className="font-mono text-xs bg-slate-100 px-1 py-0.5 rounded">
+                tejaswi-portfolio
+              </code>
+              ) and choose <strong>Add file → Upload files</strong>.
             </li>
             <li>
-              Drag all extracted files (including the{' '}
+              Drag the extracted <code className="font-mono text-xs bg-slate-100 px-1 py-0.5 rounded">.py</code>{' '}
+              and <code className="font-mono text-xs bg-slate-100 px-1 py-0.5 rounded">.json</code>{' '}
+              files (including the{' '}
               <code className="font-mono text-xs bg-slate-100 px-1 py-0.5 rounded">
                 projects/
               </code>{' '}

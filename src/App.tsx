@@ -58,6 +58,7 @@ export default function App() {
     INITIAL_GENERATED_FILES[0].id,
   );
   const [isZipping, setIsZipping] = useState(false);
+  const [detectedZips, setDetectedZips] = useState<string[]>([]);
 
   const currentMetrics = useMemo(
     () => toLanguageEntries(repo.languages),
@@ -84,61 +85,89 @@ export default function App() {
     return py ? py.percentage : 0;
   }, [projectedMetrics]);
 
+  const bytesNeededFor45 = useMemo(() => {
+    const existingPython = repo.languages.Python ?? 0;
+    const nonPython = Object.entries(repo.languages)
+      .filter(([lang]) => lang !== 'Python')
+      .reduce((sum, [, val]) => sum + val, 0);
+    const totalPythonNeeded = Math.ceil((0.45 * nonPython) / 0.55);
+    return Math.max(0, totalPythonNeeded - existingPython);
+  }, [repo.languages]);
+
   const enabledPaths = useMemo(
     () => files.filter((f) => enabledIds[f.id]).map((f) => f.path),
     [files, enabledIds],
   );
 
-  async function handleRefreshFromGitHub(e: React.FormEvent) {
-    e.preventDefault();
-    const parsed = parseRepoSlug(repoInput);
+  async function syncRepo(slugOrUrl: string) {
+    const parsed = parseRepoSlug(slugOrUrl);
     if (!parsed) {
       setSyncError('Enter a valid GitHub URL or owner/repository name.');
       return;
     }
 
+    setRepoInput(`${parsed.owner}/${parsed.repo}`);
     setIsSyncing(true);
     setSyncError(null);
     try {
-      const [langRes, contentsRes] = await Promise.all([
+      const [metaRes, langRes] = await Promise.all([
+        fetch(`https://api.github.com/repos/${parsed.owner}/${parsed.repo}`),
         fetch(`https://api.github.com/repos/${parsed.owner}/${parsed.repo}/languages`),
-        fetch(`https://api.github.com/repos/${parsed.owner}/${parsed.repo}/contents`),
       ]);
 
       if (!langRes.ok) {
         throw new Error(`GitHub API returned status ${langRes.status}.`);
       }
 
+      const meta = metaRes.ok
+        ? ((await metaRes.json()) as { default_branch?: string })
+        : {};
+      const branch = meta.default_branch || 'main';
       const languages = (await langRes.json()) as Record<string, number>;
+
+      const treeRes = await fetch(
+        `https://api.github.com/repos/${parsed.owner}/${parsed.repo}/git/trees/${branch}?recursive=1`,
+      );
+
       let existingFiles = repo.existingFiles;
-      if (contentsRes.ok) {
-        const rawContents = (await contentsRes.json()) as Array<{
-          name: string;
-          size: number;
-          type: string;
-        }>;
-        if (Array.isArray(rawContents)) {
-          existingFiles = rawContents.map((item) => {
-            const lower = item.name.toLowerCase();
+      const foundZips: string[] = [];
+
+      if (treeRes.ok) {
+        const treeData = (await treeRes.json()) as {
+          tree?: Array<{ path: string; type: string; size?: number }>;
+        };
+        if (Array.isArray(treeData.tree)) {
+          const blobs = treeData.tree.filter((item) => item.type === 'blob');
+          existingFiles = blobs.map((item) => {
+            const lower = item.path.toLowerCase();
+            if (lower.endsWith('.zip')) {
+              foundZips.push(item.path);
+            }
             const counted =
               lower.endsWith('.html') ||
               lower.endsWith('.js') ||
               lower.endsWith('.py') ||
-              lower.endsWith('.ts');
+              lower.endsWith('.ts') ||
+              lower.endsWith('.tsx') ||
+              lower.endsWith('.css');
             const language = lower.endsWith('.html')
               ? 'HTML'
-              : lower.endsWith('.js')
-                ? 'JavaScript'
-                : lower.endsWith('.py')
-                  ? 'Python'
-                  : lower.endsWith('.css')
-                    ? 'CSS (ignored by Linguist)'
-                    : lower.endsWith('.pdf')
-                      ? 'PDF (binary)'
-                      : 'Other';
+              : lower.endsWith('.ts') || lower.endsWith('.tsx')
+                ? 'TypeScript'
+                : lower.endsWith('.js')
+                  ? 'JavaScript'
+                  : lower.endsWith('.py')
+                    ? 'Python'
+                    : lower.endsWith('.css')
+                      ? 'CSS'
+                      : lower.endsWith('.zip')
+                        ? 'ZIP archive (ignored)'
+                        : lower.endsWith('.pdf')
+                          ? 'PDF (binary)'
+                          : 'Other';
             return {
-              name: item.name,
-              bytes: item.size,
+              name: item.path,
+              bytes: item.size ?? 0,
               countedByLinguist: counted,
               language,
             };
@@ -146,10 +175,11 @@ export default function App() {
         }
       }
 
+      setDetectedZips(foundZips);
       setRepo({
         owner: parsed.owner,
         repo: parsed.repo,
-        branch: 'main',
+        branch,
         repoUrl: `https://github.com/${parsed.owner}/${parsed.repo}`,
         pagesUrl: `https://${parsed.owner}.github.io/${parsed.repo}/`,
         languages,
@@ -165,6 +195,11 @@ export default function App() {
     } finally {
       setIsSyncing(false);
     }
+  }
+
+  async function handleRefreshFromGitHub(e: React.FormEvent) {
+    e.preventDefault();
+    await syncRepo(repoInput);
   }
 
   function applyPreset(preset: 'balanced' | 'majority' | 'all') {
@@ -301,54 +336,91 @@ export default function App() {
           <div className="flex flex-col lg:flex-row lg:items-end justify-between gap-6">
             <div className="space-y-2 max-w-2xl">
               <p className="text-xs font-medium text-indigo-600">
-                {repo.owner}/{repo.repo} · {repo.lastSyncedLabel}
+                {repo.owner}/{repo.repo} · {repo.lastSyncedLabel} · Need{' '}
+                <span className="font-mono tabular-nums">
+                  {bytesNeededFor45.toLocaleString()}
+                </span>{' '}
+                Python bytes for 45%
               </p>
               <h1 className="text-3xl sm:text-4xl font-bold tracking-tight text-slate-900 [text-wrap:balance]">
-                Shift your portfolio repository to {projectedPythonPct.toFixed(1)}% Python
+                Shift {repo.repo} to {projectedPythonPct.toFixed(1)}% Python
               </h1>
               <p className="text-base text-slate-600 leading-relaxed">
-                Your live portfolio site stays online at{' '}
+                Inspecting{' '}
                 <a
-                  href={repo.pagesUrl}
+                  href={repo.repoUrl}
                   target="_blank"
                   rel="noopener noreferrer"
                   className="text-indigo-600 hover:underline inline-flex items-center gap-1 font-medium"
                 >
-                  tejaswibhoge-tech.github.io/tejaswi-portfolio
+                  github.com/{repo.owner}/{repo.repo}
                   <ExternalLink className="w-3.5 h-3.5" />
                 </a>{' '}
-                while genuine Python modules bring GitHub&apos;s repository language
-                bar into the 40–50%+ range.
+                ({currentMetrics.totalBytes.toLocaleString()} counted bytes). Add
+                extracted <code className="font-mono text-xs">.py</code> files
+                directly to <code className="font-mono text-xs">{repo.branch}</code>{' '}
+                to update GitHub&apos;s language bar.
               </p>
             </div>
 
-            <form
-              onSubmit={handleRefreshFromGitHub}
-              className="flex items-center gap-2 w-full lg:w-auto"
-            >
-              <label htmlFor="repo-input" className="sr-only">
-                GitHub repository URL or slug
-              </label>
-              <input
-                id="repo-input"
-                type="text"
-                value={repoInput}
-                onChange={(e) => setRepoInput(e.target.value)}
-                placeholder="owner/repository"
-                className="w-full lg:w-72 px-3.5 py-2 text-sm font-mono bg-white border border-slate-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-indigo-500"
-              />
-              <button
-                type="submit"
-                disabled={isSyncing}
-                className="inline-flex items-center gap-1.5 px-4 py-2 text-xs font-semibold text-slate-800 bg-white border border-slate-200 hover:bg-slate-100 rounded-lg transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+            <div className="space-y-2 w-full lg:w-auto">
+              <form
+                onSubmit={handleRefreshFromGitHub}
+                className="flex items-center gap-2 w-full lg:w-auto"
               >
-                <RefreshCw
-                  className={`w-3.5 h-3.5 ${isSyncing ? 'animate-spin' : ''}`}
+                <label htmlFor="repo-input" className="sr-only">
+                  GitHub repository URL or slug
+                </label>
+                <input
+                  id="repo-input"
+                  type="text"
+                  value={repoInput}
+                  onChange={(e) => setRepoInput(e.target.value)}
+                  placeholder="owner/repository"
+                  className="w-full lg:w-72 px-3.5 py-2 text-sm font-mono bg-white border border-slate-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-indigo-500"
                 />
-                {isSyncing ? 'Syncing...' : 'Sync GitHub'}
-              </button>
-            </form>
+                <button
+                  type="submit"
+                  disabled={isSyncing}
+                  className="inline-flex items-center gap-1.5 px-4 py-2 text-xs font-semibold text-slate-800 bg-white border border-slate-200 hover:bg-slate-100 rounded-lg transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+                >
+                  <RefreshCw
+                    className={`w-3.5 h-3.5 ${isSyncing ? 'animate-spin' : ''}`}
+                  />
+                  {isSyncing ? 'Syncing...' : 'Sync GitHub'}
+                </button>
+              </form>
+              <div className="flex items-center gap-2 text-xs text-slate-500">
+                <span>Quick switch:</span>
+                <button
+                  type="button"
+                  onClick={() => syncRepo('tejaswibhoge-tech/tejaswi-portfolio')}
+                  className="font-mono text-indigo-600 hover:underline cursor-pointer"
+                >
+                  tejaswi-portfolio
+                </button>
+                <span aria-hidden="true">·</span>
+                <button
+                  type="button"
+                  onClick={() => syncRepo('tejaswibhoge-tech/Teja_portfolio')}
+                  className="font-mono text-indigo-600 hover:underline cursor-pointer"
+                >
+                  Teja_portfolio
+                </button>
+              </div>
+            </div>
           </div>
+
+          {detectedZips.length > 0 && (
+            <div className="text-sm text-amber-900 bg-amber-50 border border-amber-200 rounded-xl px-4 py-3">
+              <strong>Unextracted archive detected:</strong>{' '}
+              <code className="font-mono text-xs">{detectedZips.join(', ')}</code>{' '}
+              was uploaded as a <code className="font-mono text-xs">.zip</code> file.
+              GitHub ignores <code className="font-mono text-xs">.zip</code> files in
+              its language bar — extract the archive first and upload the individual{' '}
+              <code className="font-mono text-xs">.py</code> files instead.
+            </div>
+          )}
 
           {syncError && (
             <p className="text-sm text-amber-700 bg-amber-50 border border-amber-200 rounded-lg px-4 py-2.5">
@@ -360,7 +432,7 @@ export default function App() {
           <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
             <LanguageBar
               title="Current GitHub Repository"
-              subtitle="Live bytes detected by GitHub Linguist on main"
+              subtitle={`Live bytes detected by GitHub Linguist on ${repo.branch}`}
               entries={currentMetrics.entries}
               totalBytes={currentMetrics.totalBytes}
             />
