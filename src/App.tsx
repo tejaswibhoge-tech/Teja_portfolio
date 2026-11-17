@@ -1,629 +1,456 @@
-import { useMemo, useState } from 'react';
-import JSZip from 'jszip';
-import { Download, ExternalLink, RefreshCw } from 'lucide-react';
-import {
-  GeneratedFile,
-  INITIAL_GENERATED_FILES,
-  INITIAL_REPO_SNAPSHOT,
-  LANGUAGE_COLORS,
-  RepoSnapshot,
-  utf8ByteLength,
-} from './data/pythonModules';
-import { LanguageBar, LanguageEntry } from './components/LanguageBar';
-import { CodeStudio } from './components/CodeStudio';
-import { UploadGuide } from './components/UploadGuide';
+import { useState } from 'react';
+import { Check, Copy, Download, FileCode2, X } from 'lucide-react';
+import { INITIAL_GENERATED_FILES, utf8ByteLength } from './data/pythonModules';
 
-function toLanguageEntries(
-  languages: Record<string, number>,
-): { entries: LanguageEntry[]; totalBytes: number } {
-  const totalBytes = Object.values(languages).reduce((sum, n) => sum + n, 0);
-  const entries = Object.entries(languages)
-    .filter(([, bytes]) => bytes > 0)
-    .sort((a, b) => b[1] - a[1])
-    .map(([name, bytes]) => ({
-      name,
-      bytes,
-      percentage: totalBytes > 0 ? (bytes / totalBytes) * 100 : 0,
-      color: LANGUAGE_COLORS[name] ?? LANGUAGE_COLORS.Other,
-    }));
-  return { entries, totalBytes };
-}
-
-function parseRepoSlug(input: string): { owner: string; repo: string } | null {
-  const trimmed = input.trim().replace(/\.git$/, '').replace(/\/$/, '');
-  const urlMatch = trimmed.match(/github\.com\/([^/]+)\/([^/]+)/i);
-  if (urlMatch) {
-    return { owner: urlMatch[1], repo: urlMatch[2] };
-  }
-  const slugMatch = trimmed.match(/^([A-Za-z0-9_.-]+)\/([A-Za-z0-9_.-]+)$/);
-  if (slugMatch) {
-    return { owner: slugMatch[1], repo: slugMatch[2] };
-  }
-  return null;
-}
+const REPO_BASE = 'https://tejaswibhoge-tech.github.io/tejaswi-portfolio';
+const TARGET_PYTHON_FILES = INITIAL_GENERATED_FILES.filter(
+  (f) => f.id === 'generate_portfolio' || f.id === 'ai_study_buddy',
+);
 
 export default function App() {
-  const [repo, setRepo] = useState<RepoSnapshot>(INITIAL_REPO_SNAPSHOT);
-  const [repoInput, setRepoInput] = useState(
-    `${INITIAL_REPO_SNAPSHOT.owner}/${INITIAL_REPO_SNAPSHOT.repo}`,
+  const [menuOpen, setMenuOpen] = useState(false);
+  const [drawerOpen, setDrawerOpen] = useState(false);
+  const [copiedId, setCopiedId] = useState<string | null>(null);
+
+  const currentYear = new Date().getFullYear();
+
+  const totalAddedPythonBytes = TARGET_PYTHON_FILES.reduce(
+    (sum, f) => sum + utf8ByteLength(f.content),
+    0,
   );
-  const [isSyncing, setIsSyncing] = useState(false);
-  const [syncError, setSyncError] = useState<string | null>(null);
+  const existingRepoBytes = 6406 + 341; // index.html (6406) + script.js (341)
+  const projectedPct = (
+    (totalAddedPythonBytes / (totalAddedPythonBytes + existingRepoBytes)) *
+    100
+  ).toFixed(1);
 
-  const [files, setFiles] = useState<GeneratedFile[]>(INITIAL_GENERATED_FILES);
-  const [enabledIds, setEnabledIds] = useState<Record<string, boolean>>(() =>
-    Object.fromEntries(INITIAL_GENERATED_FILES.map((f) => [f.id, f.defaultEnabled])),
-  );
-  const [activeFileId, setActiveFileId] = useState<string>(
-    INITIAL_GENERATED_FILES[0].id,
-  );
-  const [isZipping, setIsZipping] = useState(false);
-  const [detectedZips, setDetectedZips] = useState<string[]>([]);
-
-  const currentMetrics = useMemo(
-    () => toLanguageEntries(repo.languages),
-    [repo.languages],
-  );
-
-  const addedPythonBytes = useMemo(() => {
-    return files.reduce((sum, file) => {
-      if (!enabledIds[file.id] || !file.countedByLinguist) return sum;
-      return sum + utf8ByteLength(file.content);
-    }, 0);
-  }, [files, enabledIds]);
-
-  const projectedMetrics = useMemo(() => {
-    const combined: Record<string, number> = { ...repo.languages };
-    if (addedPythonBytes > 0) {
-      combined.Python = (combined.Python ?? 0) + addedPythonBytes;
-    }
-    return toLanguageEntries(combined);
-  }, [repo.languages, addedPythonBytes]);
-
-  const projectedPythonPct = useMemo(() => {
-    const py = projectedMetrics.entries.find((e) => e.name === 'Python');
-    return py ? py.percentage : 0;
-  }, [projectedMetrics]);
-
-  const bytesNeededFor45 = useMemo(() => {
-    const existingPython = repo.languages.Python ?? 0;
-    const nonPython = Object.entries(repo.languages)
-      .filter(([lang]) => lang !== 'Python')
-      .reduce((sum, [, val]) => sum + val, 0);
-    const totalPythonNeeded = Math.ceil((0.45 * nonPython) / 0.55);
-    return Math.max(0, totalPythonNeeded - existingPython);
-  }, [repo.languages]);
-
-  const enabledPaths = useMemo(
-    () => files.filter((f) => enabledIds[f.id]).map((f) => f.path),
-    [files, enabledIds],
-  );
-
-  async function syncRepo(slugOrUrl: string) {
-    const parsed = parseRepoSlug(slugOrUrl);
-    if (!parsed) {
-      setSyncError('Enter a valid GitHub URL or owner/repository name.');
-      return;
-    }
-
-    setRepoInput(`${parsed.owner}/${parsed.repo}`);
-    setIsSyncing(true);
-    setSyncError(null);
+  async function handleCopy(id: string, content: string) {
     try {
-      const [metaRes, langRes] = await Promise.all([
-        fetch(`https://api.github.com/repos/${parsed.owner}/${parsed.repo}`),
-        fetch(`https://api.github.com/repos/${parsed.owner}/${parsed.repo}/languages`),
-      ]);
-
-      if (!langRes.ok) {
-        throw new Error(`GitHub API returned status ${langRes.status}.`);
-      }
-
-      const meta = metaRes.ok
-        ? ((await metaRes.json()) as { default_branch?: string })
-        : {};
-      const branch = meta.default_branch || 'main';
-      const languages = (await langRes.json()) as Record<string, number>;
-
-      const treeRes = await fetch(
-        `https://api.github.com/repos/${parsed.owner}/${parsed.repo}/git/trees/${branch}?recursive=1`,
-      );
-
-      let existingFiles = repo.existingFiles;
-      const foundZips: string[] = [];
-
-      if (treeRes.ok) {
-        const treeData = (await treeRes.json()) as {
-          tree?: Array<{ path: string; type: string; size?: number }>;
-        };
-        if (Array.isArray(treeData.tree)) {
-          const blobs = treeData.tree.filter((item) => item.type === 'blob');
-          existingFiles = blobs.map((item) => {
-            const lower = item.path.toLowerCase();
-            if (lower.endsWith('.zip')) {
-              foundZips.push(item.path);
-            }
-            const counted =
-              lower.endsWith('.html') ||
-              lower.endsWith('.js') ||
-              lower.endsWith('.py') ||
-              lower.endsWith('.ts') ||
-              lower.endsWith('.tsx') ||
-              lower.endsWith('.css');
-            const language = lower.endsWith('.html')
-              ? 'HTML'
-              : lower.endsWith('.ts') || lower.endsWith('.tsx')
-                ? 'TypeScript'
-                : lower.endsWith('.js')
-                  ? 'JavaScript'
-                  : lower.endsWith('.py')
-                    ? 'Python'
-                    : lower.endsWith('.css')
-                      ? 'CSS'
-                      : lower.endsWith('.zip')
-                        ? 'ZIP archive (ignored)'
-                        : lower.endsWith('.pdf')
-                          ? 'PDF (binary)'
-                          : 'Other';
-            return {
-              name: item.path,
-              bytes: item.size ?? 0,
-              countedByLinguist: counted,
-              language,
-            };
-          });
-        }
-      }
-
-      setDetectedZips(foundZips);
-      setRepo({
-        owner: parsed.owner,
-        repo: parsed.repo,
-        branch,
-        repoUrl: `https://github.com/${parsed.owner}/${parsed.repo}`,
-        pagesUrl: `https://${parsed.owner}.github.io/${parsed.repo}/`,
-        languages,
-        existingFiles,
-        lastSyncedLabel: `Synced at ${new Date().toLocaleTimeString()}`,
-      });
-    } catch (err) {
-      setSyncError(
-        err instanceof Error
-          ? `${err.message} Showing cached repository snapshot.`
-          : 'Could not reach GitHub API. Showing cached snapshot.',
-      );
-    } finally {
-      setIsSyncing(false);
+      await navigator.clipboard.writeText(content);
+      setCopiedId(id);
+      setTimeout(() => setCopiedId(null), 1800);
+    } catch {
+      // Clipboard blocked
     }
   }
 
-  async function handleRefreshFromGitHub(e: React.FormEvent) {
-    e.preventDefault();
-    await syncRepo(repoInput);
-  }
-
-  function applyPreset(preset: 'balanced' | 'majority' | 'all') {
-    if (preset === 'balanced') {
-      setEnabledIds({
-        generate_portfolio: true,
-        ai_study_buddy: true,
-        campus_navigator: false,
-        test_portfolio: false,
-        portfolio_data: true,
-        requirements: true,
-      });
-    } else if (preset === 'majority') {
-      setEnabledIds({
-        generate_portfolio: true,
-        ai_study_buddy: true,
-        campus_navigator: true,
-        test_portfolio: false,
-        portfolio_data: true,
-        requirements: true,
-      });
-    } else {
-      setEnabledIds(Object.fromEntries(files.map((f) => [f.id, true])));
-    }
-  }
-
-  function handleToggleFile(id: string) {
-    setEnabledIds((prev) => ({ ...prev, [id]: !prev[id] }));
-  }
-
-  function handleChangeContent(id: string, nextContent: string) {
-    setFiles((prev) =>
-      prev.map((f) => (f.id === id ? { ...f, content: nextContent } : f)),
-    );
-  }
-
-  function handleResetFile(id: string) {
-    const original = INITIAL_GENERATED_FILES.find((f) => f.id === id);
-    if (!original) return;
-    setFiles((prev) =>
-      prev.map((f) => (f.id === id ? { ...f, content: original.content } : f)),
-    );
-  }
-
-  function handleDownloadSingle(file: GeneratedFile) {
-    const blob = new Blob([file.content], { type: 'text/plain;charset=utf-8' });
+  function handleDownload(path: string, content: string) {
+    const blob = new Blob([content], { type: 'text/x-python;charset=utf-8' });
     const url = URL.createObjectURL(blob);
     const link = document.createElement('a');
     link.href = url;
-    link.download = file.path.split('/').pop() ?? file.path;
+    link.download = path.split('/').pop() ?? path;
     document.body.appendChild(link);
     link.click();
     link.remove();
     URL.revokeObjectURL(url);
   }
 
-  async function handleDownloadZip() {
-    setIsZipping(true);
-    try {
-      const zip = new JSZip();
-      for (const file of files) {
-        if (enabledIds[file.id]) {
-          zip.file(file.path, file.content);
-        }
-      }
-      const blob = await zip.generateAsync({ type: 'blob' });
-      const url = URL.createObjectURL(blob);
-      const link = document.createElement('a');
-      link.href = url;
-      link.download = `${repo.repo}-python-bundle.zip`;
-      document.body.appendChild(link);
-      link.click();
-      link.remove();
-      URL.revokeObjectURL(url);
-    } finally {
-      setIsZipping(false);
-    }
-  }
-
   return (
-    <div className="min-h-screen flex flex-col bg-slate-50 text-slate-900">
-      {/* Top Bar Contract: 3 zones separated by gap-8 */}
-      <header className="sticky top-0 z-30 bg-white/95 backdrop-blur border-b border-slate-200">
-        <div className="max-w-7xl mx-auto px-6 py-3.5 flex items-center justify-between gap-8">
-          <a
-            href="#overview"
-            className="text-base font-bold tracking-tight text-slate-900 whitespace-nowrap shrink-0"
-          >
-            Portfolio Linguist Studio
+    <div className="portfolio-root relative">
+      <div className="glow g1" />
+      <div className="glow g2" />
+
+      <header>
+        <a className="brand" href="#home">
+          <b>T</b> tejaswi<span>.</span>
+        </a>
+        <button
+          id="menu"
+          type="button"
+          aria-label="Toggle menu"
+          onClick={() => setMenuOpen((prev) => !prev)}
+        >
+          ☰
+        </button>
+        <nav id="nav" className={menuOpen ? 'open' : undefined}>
+          <a href="#about" onClick={() => setMenuOpen(false)}>
+            About
           </a>
-
-          <nav className="hidden md:flex items-center gap-6 text-sm font-medium text-slate-600">
-            <a
-              href="#overview"
-              className="hover:text-slate-900 transition-colors whitespace-nowrap shrink-0"
-            >
-              Overview
-            </a>
-            <a
-              href="#files"
-              className="hover:text-slate-900 transition-colors whitespace-nowrap shrink-0"
-            >
-              Python Files
-            </a>
-            <a
-              href="#math"
-              className="hover:text-slate-900 transition-colors whitespace-nowrap shrink-0"
-            >
-              Linguist Math
-            </a>
-            <a
-              href="#upload"
-              className="hover:text-slate-900 transition-colors whitespace-nowrap shrink-0"
-            >
-              Upload Guide
-            </a>
-          </nav>
-
-          <button
-            type="button"
-            onClick={handleDownloadZip}
-            disabled={isZipping || enabledPaths.length === 0}
-            className="inline-flex items-center gap-2 px-4 py-2 text-xs font-semibold text-white bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50 rounded-lg transition-colors whitespace-nowrap shrink-0 cursor-pointer"
-          >
-            <Download className="w-3.5 h-3.5" />
-            {isZipping ? 'Packaging...' : 'Download .zip Bundle'}
-          </button>
-        </div>
+          <a href="#skills" onClick={() => setMenuOpen(false)}>
+            Skills
+          </a>
+          <a href="#projects" onClick={() => setMenuOpen(false)}>
+            Projects
+          </a>
+          <a href="#certificates" onClick={() => setMenuOpen(false)}>
+            Certificates
+          </a>
+          <a className="nav-cta" href="#contact" onClick={() => setMenuOpen(false)}>
+            Let&apos;s connect ↗
+          </a>
+        </nav>
       </header>
 
-      <main className="flex-1 max-w-7xl w-full mx-auto px-6 py-10 space-y-12">
-        {/* Section 01: Overview & Live Repo Sync */}
-        <section id="overview" className="space-y-6">
-          <div className="flex flex-col lg:flex-row lg:items-end justify-between gap-6">
-            <div className="space-y-2 max-w-2xl">
-              <p className="text-xs font-medium text-indigo-600">
-                {repo.owner}/{repo.repo} · {repo.lastSyncedLabel} · Need{' '}
-                <span className="font-mono tabular-nums">
-                  {bytesNeededFor45.toLocaleString()}
-                </span>{' '}
-                Python bytes for 45%
-              </p>
-              <h1 className="text-3xl sm:text-4xl font-bold tracking-tight text-slate-900 [text-wrap:balance]">
-                Shift {repo.repo} to {projectedPythonPct.toFixed(1)}% Python
-              </h1>
-              <p className="text-base text-slate-600 leading-relaxed">
-                Inspecting{' '}
-                <a
-                  href={repo.repoUrl}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  className="text-indigo-600 hover:underline inline-flex items-center gap-1 font-medium"
-                >
-                  github.com/{repo.owner}/{repo.repo}
-                  <ExternalLink className="w-3.5 h-3.5" />
-                </a>{' '}
-                ({currentMetrics.totalBytes.toLocaleString()} counted bytes). Add
-                extracted <code className="font-mono text-xs">.py</code> files
-                directly to <code className="font-mono text-xs">{repo.branch}</code>{' '}
-                to update GitHub&apos;s language bar.
-              </p>
+      <main>
+        <section className="hero wrap" id="home">
+          <div>
+            <div className="status">
+              <i /> OPEN TO LEARNING &amp; OPPORTUNITIES
             </div>
+            <p className="eyebrow">HELLO, I&apos;M</p>
+            <h1>
+              Bhoge
+              <br />
+              <em>Tejaswi.</em>
+            </h1>
+            <p className="intro">
+              A curious Computer Science student who enjoys learning, solving
+              problems and turning ideas into useful digital experiences.
+            </p>
+            <div className="actions">
+              <a className="primary" href="#projects">
+                Explore my work ↗
+              </a>
+              <a className="secondary" href="#about">
+                Get to know me ↓
+              </a>
+            </div>
+            <p className="meta">
+              BASED IN INDIA <span>•</span> COMPUTER SCIENCE &amp; ENGINEERING
+            </p>
+          </div>
 
-            <div className="space-y-2 w-full lg:w-auto">
-              <form
-                onSubmit={handleRefreshFromGitHub}
-                className="flex items-center gap-2 w-full lg:w-auto"
-              >
-                <label htmlFor="repo-input" className="sr-only">
-                  GitHub repository URL or slug
-                </label>
-                <input
-                  id="repo-input"
-                  type="text"
-                  value={repoInput}
-                  onChange={(e) => setRepoInput(e.target.value)}
-                  placeholder="owner/repository"
-                  className="w-full lg:w-72 px-3.5 py-2 text-sm font-mono bg-white border border-slate-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-indigo-500"
-                />
-                <button
-                  type="submit"
-                  disabled={isSyncing}
-                  className="inline-flex items-center gap-1.5 px-4 py-2 text-xs font-semibold text-slate-800 bg-white border border-slate-200 hover:bg-slate-100 rounded-lg transition-colors whitespace-nowrap shrink-0 cursor-pointer"
-                >
-                  <RefreshCw
-                    className={`w-3.5 h-3.5 ${isSyncing ? 'animate-spin' : ''}`}
-                  />
-                  {isSyncing ? 'Syncing...' : 'Sync GitHub'}
-                </button>
-              </form>
-              <div className="flex items-center gap-2 text-xs text-slate-500">
-                <span>Quick switch:</span>
-                <button
-                  type="button"
-                  onClick={() => syncRepo('tejaswibhoge-tech/tejaswi-portfolio')}
-                  className="font-mono text-indigo-600 hover:underline cursor-pointer"
-                >
-                  tejaswi-portfolio
-                </button>
-                <span aria-hidden="true">·</span>
-                <button
-                  type="button"
-                  onClick={() => syncRepo('tejaswibhoge-tech/Teja_portfolio')}
-                  className="font-mono text-indigo-600 hover:underline cursor-pointer"
-                >
-                  Teja_portfolio
-                </button>
+          <div className="art">
+            <div className="orbit" />
+            <div className="profile-card">
+              <small>STUDENT • CREATOR • LEARNER</small>
+              <strong>
+                T<span>.</span>
+              </strong>
+              <small className="card-foot">
+                BHOGE TEJASWI <span>✦ 2026</span>
+              </small>
+            </div>
+            <label className="chip chip1">✦ Curious mind</label>
+            <label className="chip chip2">Learning every day ↗</label>
+          </div>
+        </section>
+
+        <section className="wrap section" id="about">
+          <p className="kicker">01 / ABOUT</p>
+          <h2>
+            A little about <em>me.</em>
+          </h2>
+          <div className="two-col">
+            <h3>
+              I believe every new skill starts with curiosity and every good
+              solution starts with asking the right questions.
+            </h3>
+            <div>
+              <p>
+                I am Bhoge Tejaswi, a Computer Science and Engineering student
+                interested in technology, logical thinking and creative
+                problem-solving. I enjoy exploring new tools, strengthening my
+                fundamentals and working on ideas that can make everyday tasks
+                easier.
+              </p>
+              <div className="pills">
+                <span>🎓 CSE Student</span>
+                <span>📍 India</span>
+                <span>✉️ Email-friendly</span>
               </div>
             </div>
           </div>
+        </section>
 
-          {detectedZips.length > 0 && (
-            <div className="text-sm text-amber-900 bg-amber-50 border border-amber-200 rounded-xl px-4 py-3">
-              <strong>Unextracted archive detected:</strong>{' '}
-              <code className="font-mono text-xs">{detectedZips.join(', ')}</code>{' '}
-              was uploaded as a <code className="font-mono text-xs">.zip</code> file.
-              GitHub ignores <code className="font-mono text-xs">.zip</code> files in
-              its language bar — extract the archive first and upload the individual{' '}
-              <code className="font-mono text-xs">.py</code> files instead.
-            </div>
-          )}
+        <section className="wrap section" id="skills">
+          <p className="kicker">02 / SKILLS</p>
+          <h2>
+            Tools I’m learning
+            <br />
+            and <em>growing with.</em>
+          </h2>
+          <div className="skills">
+            <article>
+              <b>⌘</b>
+              <h3>Programming</h3>
+              <p>Building a foundation in programming logic and problem-solving.</p>
+              <div className="tags">
+                <span>Python</span>
+                <span>Java</span>
+                <span>Basics of C</span>
+              </div>
+            </article>
+            <article>
+              <b>◇</b>
+              <h3>Web technologies</h3>
+              <p>
+                Exploring how to create clean, accessible and responsive websites.
+              </p>
+              <div className="tags">
+                <span>HTML</span>
+                <span>CSS</span>
+                <span>JavaScript</span>
+              </div>
+            </article>
+            <article>
+              <b>✳</b>
+              <h3>Core concepts</h3>
+              <p>
+                Strengthening analytical thinking and computer science
+                fundamentals.
+              </p>
+              <div className="tags">
+                <span>Discrete Mathematics</span>
+                <span>Problem Solving</span>
+              </div>
+            </article>
+          </div>
+          <p className="note">
+            Skills listed are learning areas and can be updated as experience
+            grows.
+          </p>
+        </section>
 
-          {syncError && (
-            <p className="text-sm text-amber-700 bg-amber-50 border border-amber-200 rounded-lg px-4 py-2.5">
-              {syncError}
-            </p>
-          )}
+        <section className="wrap section" id="projects">
+          <p className="kicker">03 / SELECTED WORK</p>
+          <h2>
+            Ideas worth
+            <br />
+            <em>exploring.</em>
+          </h2>
+          <div className="projects">
+            <article className="project lilac">
+              <div className="project-top">
+                PROJECT 01 <b>⌖</b>
+              </div>
+              <div className="visual map">
+                <span className="road r1" />
+                <span className="road r2" />
+                <i>●</i>
+                <i>●</i>
+                <i>●</i>
+                <small>CAMPUS MAP</small>
+              </div>
+              <h3>Smart Campus Navigator</h3>
+              <p>
+                A campus navigation concept that helps students locate classrooms,
+                labs, the library and student facilities through a simple
+                interactive map.
+              </p>
+              <div className="project-bottom">
+                <div className="tags">
+                  <span>HTML</span>
+                  <span>CSS</span>
+                  <span>JavaScript</span>
+                </div>
+                <small>ACADEMIC CONCEPT</small>
+              </div>
+            </article>
 
-          {/* Side-by-side Linguist comparison */}
-          <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-            <LanguageBar
-              title="Current GitHub Repository"
-              subtitle={`Live bytes detected by GitHub Linguist on ${repo.branch}`}
-              entries={currentMetrics.entries}
-              totalBytes={currentMetrics.totalBytes}
-            />
-            <LanguageBar
-              title="Projected After Upload"
-              subtitle={`Adding ${addedPythonBytes.toLocaleString()} bytes of Python code`}
-              entries={projectedMetrics.entries}
-              totalBytes={projectedMetrics.totalBytes}
-              highlightPython
-            />
+            <article className="project peach">
+              <div className="project-top">
+                PROJECT 02 <b>✧</b>
+              </div>
+              <div className="visual study">
+                <div className="window">
+                  <small>•••</small>
+                  <b>MY STUDY PLAN</b>
+                  <p>
+                    ▣ &nbsp; Data Structures <strong>✓</strong>
+                  </p>
+                  <p>
+                    ▣ &nbsp; Mathematics <strong>✓</strong>
+                  </p>
+                  <p>
+                    ▣ &nbsp; Programming <strong>↗</strong>
+                  </p>
+                </div>
+              </div>
+              <h3>AI Study Buddy</h3>
+              <p>
+                A student productivity concept for organizing subjects, planning
+                study sessions and tracking learning goals, with scope to add
+                AI-powered study suggestions.
+              </p>
+              <div className="project-bottom">
+                <div className="tags">
+                  <span>Python</span>
+                  <span>UI Design</span>
+                  <span>AI Concept</span>
+                </div>
+                <small>ACADEMIC CONCEPT</small>
+              </div>
+            </article>
+          </div>
+          <p className="note">
+            These are portfolio project concepts. Update the descriptions and
+            technologies to match the projects when implemented.
+          </p>
+        </section>
+
+        <section className="wrap section" id="certificates">
+          <p className="kicker">04 / CERTIFICATES</p>
+          <h2>
+            Learning, one step
+            <br />
+            at a <em>time.</em>
+          </h2>
+          <p className="cert-intro">
+            Certificates earned through Wolfram U, included as part of my learning
+            journey.
+          </p>
+          <div className="certs">
+            <article>
+              <div className="seal">
+                W<span>U</span>
+              </div>
+              <div>
+                <small>WOLFRAM U • LEVEL 1</small>
+                <h3>Discrete Mathematics</h3>
+                <p>Level 1 Certificate · November 2026 · 4 Training Hours</p>
+                <a
+                  href={`${REPO_BASE}/wolfram-level-1-discrete-mathematics.pdf`}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                >
+                  View certificate ↗
+                </a>
+              </div>
+            </article>
+            <article>
+              <div className="seal">
+                W<span>U</span>
+              </div>
+              <div>
+                <small>WOLFRAM U • COMPLETION</small>
+                <h3>Introduction to Discrete Mathematics</h3>
+                <p>Completion Certificate · November 2026 · 4 Training Hours</p>
+                <a
+                  href={`${REPO_BASE}/introduction-to-discrete-mathematics.pdf`}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                >
+                  View certificate ↗
+                </a>
+              </div>
+            </article>
           </div>
         </section>
 
-        {/* Section 02: Python File Studio */}
-        <section id="files" className="space-y-4">
-          <div className="flex flex-wrap items-center justify-between gap-4">
+        <section className="wrap contact" id="contact">
+          <div>
             <div>
-              <h2 className="text-xl font-bold text-slate-900">
-                01. Generated Python Portfolio Modules
+              <p className="kicker">05 / GET IN TOUCH</p>
+              <h2>
+                Have an idea?
+                <br />
+                <em>Let’s connect.</em>
               </h2>
-              <p className="text-sm text-slate-600 mt-0.5">
-                Toggle modules or edit code live to hit your exact Python percentage.
+              <p>
+                I’m happy to connect, learn from others and explore new
+                opportunities.
               </p>
             </div>
-
-            <div className="flex items-center gap-1 p-1 bg-slate-200/70 rounded-lg">
-              {(() => {
-                const isBalanced =
-                  enabledIds.generate_portfolio &&
-                  enabledIds.ai_study_buddy &&
-                  !enabledIds.campus_navigator &&
-                  !enabledIds.test_portfolio;
-                const isMajority =
-                  enabledIds.generate_portfolio &&
-                  enabledIds.ai_study_buddy &&
-                  enabledIds.campus_navigator &&
-                  !enabledIds.test_portfolio;
-                const isAll = files.every((f) => enabledIds[f.id]);
-
-                return (
-                  <>
-                    <button
-                      type="button"
-                      onClick={() => applyPreset('balanced')}
-                      className={`px-3 py-1.5 text-xs font-medium rounded-md transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
-                        isBalanced
-                          ? 'bg-white text-slate-900 shadow-xs'
-                          : 'text-slate-700 hover:text-slate-900 hover:bg-white/60'
-                      }`}
-                    >
-                      45–50% Target
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => applyPreset('majority')}
-                      className={`px-3 py-1.5 text-xs font-medium rounded-md transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
-                        isMajority
-                          ? 'bg-white text-slate-900 shadow-xs'
-                          : 'text-slate-700 hover:text-slate-900 hover:bg-white/60'
-                      }`}
-                    >
-                      55%+ Majority
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => applyPreset('all')}
-                      className={`px-3 py-1.5 text-xs font-medium rounded-md transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
-                        isAll
-                          ? 'bg-white text-slate-900 shadow-xs'
-                          : 'text-slate-700 hover:text-slate-900 hover:bg-white/60'
-                      }`}
-                    >
-                      All Modules
-                    </button>
-                  </>
-                );
-              })()}
-            </div>
+            <a href="mailto:tejaswibhoge@gmail.com">tejaswibhoge@gmail.com ↗</a>
           </div>
-
-          <CodeStudio
-            files={files}
-            enabledIds={enabledIds}
-            activeFileId={activeFileId}
-            onSelectFile={setActiveFileId}
-            onToggleFile={handleToggleFile}
-            onChangeContent={handleChangeContent}
-            onResetFile={handleResetFile}
-            onDownloadSingle={handleDownloadSingle}
-          />
-        </section>
-
-        {/* Section 03: Why GitHub showed 95–100% HTML (Linguist Math) */}
-        <section id="math" className="space-y-4">
-          <div>
-            <h2 className="text-xl font-bold text-slate-900">
-              02. Exact File & Linguist Byte Breakdown
-            </h2>
-            <p className="text-sm text-slate-600 mt-0.5">
-              GitHub calculates language percentages strictly from non-ignored
-              source code bytes on the default branch. CSS, Markdown, and PDFs
-              are excluded by default.
-            </p>
-          </div>
-
-          <div className="bg-white border border-slate-200 rounded-xl overflow-hidden">
-            <div className="overflow-x-auto">
-              <table className="w-full text-left border-collapse">
-                <thead>
-                  <tr className="border-b border-slate-200 bg-slate-50 text-xs font-semibold text-slate-600">
-                    <th className="py-3 px-5">Repository File</th>
-                    <th className="py-3 px-5">Classification</th>
-                    <th className="py-3 px-5">Linguist Status</th>
-                    <th className="py-3 px-5 text-right">Size (Bytes)</th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-slate-100 text-sm">
-                  {repo.existingFiles.map((file) => (
-                    <tr key={file.name} className="hover:bg-slate-50/70">
-                      <td className="py-2.5 px-5 font-mono text-xs text-slate-900">
-                        {file.name}
-                      </td>
-                      <td className="py-2.5 px-5 text-slate-600">{file.language}</td>
-                      <td className="py-2.5 px-5 text-xs text-slate-500">
-                        {file.countedByLinguist ? 'Counted in bar' : 'Excluded'}
-                      </td>
-                      <td className="py-2.5 px-5 font-mono text-xs text-slate-900 text-right tabular-nums">
-                        {file.bytes.toLocaleString()}
-                      </td>
-                    </tr>
-                  ))}
-                  {files
-                    .filter((f) => enabledIds[f.id])
-                    .map((file) => (
-                      <tr key={file.id} className="bg-indigo-50/40 hover:bg-indigo-50/70">
-                        <td className="py-2.5 px-5 font-mono text-xs font-medium text-indigo-900">
-                          + {file.path}
-                        </td>
-                        <td className="py-2.5 px-5 text-indigo-800">{file.language}</td>
-                        <td className="py-2.5 px-5 text-xs text-indigo-700">
-                          {file.countedByLinguist
-                            ? 'Added to Python bar'
-                            : 'Data / spec (excluded)'}
-                        </td>
-                        <td className="py-2.5 px-5 font-mono text-xs font-medium text-indigo-950 text-right tabular-nums">
-                          {utf8ByteLength(file.content).toLocaleString()}
-                        </td>
-                      </tr>
-                    ))}
-                </tbody>
-              </table>
-            </div>
-          </div>
-        </section>
-
-        {/* Section 04: Upload Guide */}
-        <section id="upload" className="space-y-4">
-          <div>
-            <h2 className="text-xl font-bold text-slate-900">
-              03. Apply to Your GitHub Repository
-            </h2>
-            <p className="text-sm text-slate-600 mt-0.5">
-              Add the generated Python files to{' '}
-              <code className="font-mono text-xs">{repo.owner}/{repo.repo}</code>{' '}
-              without affecting your live portfolio website.
-            </p>
-          </div>
-
-          <UploadGuide
-            repoUrl={repo.repoUrl}
-            pagesUrl={repo.pagesUrl}
-            enabledPaths={enabledPaths}
-          />
         </section>
       </main>
 
-      <footer className="border-t border-slate-200 bg-white">
-        <div className="max-w-7xl mx-auto px-6 py-5 flex flex-wrap items-center justify-between gap-4 text-xs text-slate-500">
-          <span>
-            Tailored for {repo.owner}/{repo.repo}
-          </span>
-          <a
-            href={repo.repoUrl}
-            target="_blank"
-            rel="noopener noreferrer"
-            className="hover:text-slate-900 transition-colors"
-          >
-            View repository on GitHub
-          </a>
-        </div>
+      <footer>
+        <a className="brand" href="#home">
+          <b>T</b> tejaswi<span>.</span>
+        </a>
+        <span>
+          Made with curiosity ✦ © <span id="year">{currentYear}</span> Bhoge
+          Tejaswi
+        </span>
+        <a href="#home">BACK TO TOP ↑</a>
       </footer>
+
+      {/* Discreet helper button to copy/download the two .py files for GitHub */}
+      <button
+        type="button"
+        onClick={() => setDrawerOpen(true)}
+        className="fixed bottom-5 right-5 z-40 inline-flex items-center gap-2 px-4 py-2.5 text-xs font-semibold text-white bg-[#211b35] hover:bg-[#5638b3] rounded-full shadow-lg transition-colors cursor-pointer"
+      >
+        <FileCode2 className="w-4 h-4" />
+        Get Python Files ({projectedPct}% Python)
+      </button>
+
+      {drawerOpen && (
+        <div
+          className="fixed inset-0 z-50 bg-slate-950/50 backdrop-blur-xs flex items-center justify-center p-4"
+          role="dialog"
+          aria-modal="true"
+          aria-label="Python files for tejaswi-portfolio"
+        >
+          <div className="bg-white border border-slate-200 rounded-2xl max-w-3xl w-full max-h-[88vh] flex flex-col overflow-hidden shadow-2xl">
+            <div className="px-6 py-4 border-b border-slate-200 flex items-center justify-between gap-4">
+              <div>
+                <h2 className="text-base font-bold text-slate-900">
+                  Add Python to tejaswibhoge-tech/tejaswi-portfolio ({projectedPct}%
+                  Python)
+                </h2>
+                <p className="text-xs text-slate-600 mt-0.5">
+                  Your website files stay untouched. Create these 2 files directly
+                  on GitHub using <strong>Add file → Create new file</strong> (no
+                  zip needed).
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setDrawerOpen(false)}
+                aria-label="Close"
+                className="p-2 text-slate-500 hover:text-slate-900 rounded-lg cursor-pointer"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            <div className="p-6 overflow-y-auto space-y-5">
+              {TARGET_PYTHON_FILES.map((file) => (
+                <div
+                  key={file.id}
+                  className="border border-slate-200 rounded-xl overflow-hidden"
+                >
+                  <div className="px-4 py-3 bg-slate-50 border-b border-slate-200 flex flex-wrap items-center justify-between gap-2">
+                    <div>
+                      <span className="font-mono text-xs font-semibold text-slate-900">
+                        {file.path}
+                      </span>
+                      <span className="text-xs text-slate-500 ml-2 font-mono">
+                        ({utf8ByteLength(file.content).toLocaleString()} bytes)
+                      </span>
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <button
+                        type="button"
+                        onClick={() => handleCopy(file.id, file.content)}
+                        className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-slate-700 bg-white border border-slate-200 hover:bg-slate-100 rounded-md cursor-pointer"
+                      >
+                        {copiedId === file.id ? (
+                          <>
+                            <Check className="w-3.5 h-3.5 text-emerald-600" />
+                            Copied
+                          </>
+                        ) : (
+                          <>
+                            <Copy className="w-3.5 h-3.5" />
+                            Copy code
+                          </>
+                        )}
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => handleDownload(file.path, file.content)}
+                        className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-white bg-[#7654d8] hover:bg-[#5638b3] rounded-md cursor-pointer"
+                      >
+                        <Download className="w-3.5 h-3.5" />
+                        Download .py
+                      </button>
+                    </div>
+                  </div>
+                  <pre className="p-4 bg-slate-950 text-slate-100 font-mono text-xs leading-relaxed overflow-x-auto max-h-56">
+                    <code>{file.content}</code>
+                  </pre>
+                </div>
+              ))}
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
